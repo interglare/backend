@@ -1,0 +1,90 @@
+stages:
+  - build-image
+  - deploy
+
+variables:
+  K8S_NAMESPACE: xxx
+  DEPLOYMENT_APP: backend
+  DEPLOYMENT_CONTAINER: backend
+
+
+.build.docker.template: &build_docker_definition
+  stage: build-image
+  image:
+    name: registry.bi.group/custom-images/kaniko-project/executor:debug
+    entrypoint: [""]
+  before_script:
+    - mkdir -p /kaniko/.docker
+    - |
+      cat << EOF > /kaniko/.docker/config.json
+      {
+        "auths": {
+          "$REGISTRY_URL": {
+            "auth": "$REGISTRY_TOKEN"
+          }
+        }
+      }
+      EOF
+  script:
+    - echo "$REGISTRY_URL/$K8S_NAMESPACE/$DEPLOYMENT_APP/$CI_COMMIT_BRANCH:$CI_COMMIT_SHORT_SHA"
+    - >-
+      /kaniko/executor
+      --cache=true
+      --context "${CI_PROJECT_DIR}"
+      --dockerfile "${CI_PROJECT_DIR}/Dockerfile"
+      --destination "$REGISTRY_URL/$K8S_NAMESPACE/$DEPLOYMENT_APP/$CI_COMMIT_BRANCH:$CI_COMMIT_SHORT_SHA"
+
+
+.deploy:template: &deploy_definition
+  stage: deploy
+  image: registry.bi.group/public/kubectl:gitlab-1.0.0
+  script:
+    - kubectl config set-cluster k8s --server="$K8S_SERVER" --insecure-skip-tls-verify=true
+    - kubectl config set-credentials gitlab --token="$K8S_TOKEN"
+    - kubectl config set-context default --cluster=k8s --user=gitlab --namespace="$K8S_NAMESPACE"
+    - kubectl config use-context default
+    - kubectl set image deployment/$DEPLOYMENT_APP $DEPLOYMENT_APP=$REGISTRY_URL/$K8S_NAMESPACE/$DEPLOYMENT_APP/$CI_COMMIT_BRANCH:$CI_COMMIT_SHORT_SHA
+  dependencies: []
+
+# check current branch
+.rules:testing:template: &rules_testing_definition
+  rules:
+    - if: $CI_COMMIT_BRANCH == "test"
+
+.rules:production:template: &rules_production_definition
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# step build set env
+docker:build:testing:
+  <<: *build_docker_definition
+  <<: *rules_testing_definition
+  variables:
+  tags:
+    - runner-xxx-infra
+
+docker:build:production:
+  <<: *build_docker_definition
+  <<: *rules_production_definition
+  variables:
+  tags:
+    - runner-xxx-infra
+
+# step deploy set env
+deploy:image:testing:
+  <<: *deploy_definition
+  <<: *rules_testing_definition
+  variables:
+    K8S_SERVER: $TEST_K8S_SERVER
+    K8S_TOKEN: $TEST_K8S_TOKEN
+  tags:
+    - runner-xxx-infra
+
+deploy:image:production:
+  <<: *deploy_definition
+  <<: *rules_production_definition
+  variables:
+    K8S_SERVER: $PROD_K8S_SERVER
+    K8S_TOKEN: $PROD_K8S_TOKEN
+  tags:
+    - runner-xxx-infra
